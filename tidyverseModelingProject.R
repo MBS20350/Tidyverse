@@ -23,22 +23,60 @@ train <- train %>%
 	select(-Submitted.via) %>%
 	mutate(across(c(Product, Company, State, ZIP.code), as.factor)) %>%
 	mutate(temp_id = c(1:length(Product)))
+parsedPreProc <- train %>%
+  select(temp_id, Product, Consumer.complaint.narrative) %>%
+  unnest_tokens(word, Consumer.complaint.narrative) %>%
+  anti_join(stop_words) %>%
+  filter(!str_detect(word, "xx")) %>%
+  filter(!str_detect(word, "\\d")) %>%
+  filter(!str_detect(word, "\\s")) %>%
+  mutate(word = text_tokens(word, stemmer = "en")) 
+parsedCard <- parsedPreProc %>%
+  filter(Product == "Credit card or prepaid card") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+parsedVeh <- parsedPreProc %>%
+  filter(Product == "Vehicle loan or lease") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+parsedMortg <- parsedPreProc %>%
+  filter(Product == "Mortgage") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+parsedStu <- parsedPreProc %>%
+  filter(Product == "Student loan") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+keywords1 <- full_join(parsedCard, parsedMortg)
+keywords2 <- full_join(parsedStu, parsedVeh)
+keywords <- full_join(keywords1, keywords2) %>%
+  select(word) %>%
+  distinct(word)
 parsedTrain <- train %>%
 	select(temp_id, Consumer.complaint.narrative) %>%
 	unnest_tokens(word, Consumer.complaint.narrative) %>%
-	anti_join(stop_words) %>%
-	filter(!str_detect(word, "xx")) %>%
-	filter(!str_detect(word, "\\d")) %>%
-	filter(!str_detect(word, "\\s")) %>%
 	mutate(word = text_tokens(word, stemmer = "en")) %>%
+  semi_join(keywords) %>%
 	count(temp_id, word)  
 trainDTM <- parsedTrain %>%
-	cast_dtm(temp_id, word, n)                 # 42,173 terms
-trainDTM90 <- removeSparseTerms(trainDTM, 0.90)  # 90 terms left
-trainDTM85 <- removeSparseTerms(trainDTM, 0.85)  # 49 terms left
-trainDTM75 <- removeSparseTerms(trainDTM, 0.75)  # 23 terms left
-
-tidyTrain <- trainDTM75 %>%
+	cast_dtm(temp_id, word, n)                 # 42,173 terms / 28 terms new idea
+tidyTrain <- trainDTM %>%
 	tidy() %>%
 	rename(temp_id = document) %>%
 	pivot_wider(names_from = term, 
@@ -80,7 +118,7 @@ allResults <- allTreeFit %>%
 allResults$fit$variable.importance  # Shows influence of specific variables
 allTrngPred <- predict(allTreeFit, new_data = Train)
 allTrngAcc <- accuracy(Train, truth = Product, estimate = allTrngPred$.pred_class) 
-allTrngAcc  # 77% accurate w/ DTM75
+allTrngAcc  # 77% accurate w/ DTM75, 80.1% with DTM85
 count(Train, Product)
 count(allTrngPred, .pred_class)
 
@@ -102,6 +140,8 @@ vfTreeWorkGrid <- vfTreeWork %>%
 	tune_grid(
 	resamples = vfTrain,
 	grid = vfTreeGrid)
+vfResults <- collect_metrics(vfTreeWorkGrid)
+vfBest <- show_best(vfTreeWorkGrid, metric = "accuracy") 
 
 ## https://www.tidymodels.org/start/tuning/#data
 
