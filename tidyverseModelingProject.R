@@ -9,6 +9,8 @@ library(corpus)
 library(tm)
 library(corrplot)
 library(rpart)
+library(randomForest)
+library(vip)
 set.seed(1234)
 
 ##### Load and check training set
@@ -97,7 +99,7 @@ corrplot(trainCor, tl.cex = 0.5)
 
 # Not much correlation
 
-##### Fit Decision Tree (no cross-validation)
+##### Fit & assess Decision Tree (no cross-validation)
 
 allRecipe <- Train %>%
 	recipe(Product ~ .) %>%
@@ -111,40 +113,97 @@ allTreeWork <- workflow() %>%
 	add_model(tree)
 allTreeFit <- fit(allTreeWork, data = Train)
 
-##### Assess Decision Tree (no cross-validation)
-
 allResults <- allTreeFit %>%
-	pull_workflow_fit()
-allResults$fit$variable.importance  # Shows influence of specific variables
+	pull_workflow_fit() %>%
+  vip(num_features = 30)
+allResults  # Zip codes & states not important
 allTrngPred <- predict(allTreeFit, new_data = Train)
 allTrngAcc <- accuracy(Train, truth = Product, estimate = allTrngPred$.pred_class) 
-allTrngAcc  # 77% accurate w/ DTM75, 80.1% with DTM85
+allTrngAcc  # 79.7% accurate
 count(Train, Product)
 count(allTrngPred, .pred_class)
 
-##### Fit Decision Tree (with cross-validation)
+##### Decision Tree with cross-validation and tuning
 
 vfTrain <- vfold_cv(data = Train, v = 10)
-vfTree <- decision_tree(
-		cost_complexity = tune(),
-		tree_depth = tune()) %>%
+vfTree <- decision_tree(cost_complexity = tune(),tree_depth = tune()) %>%
 	set_mode("classification") %>%
 	set_engine("rpart")
-vfTreeGrid <- grid_regular(cost_complexity(),
-                          tree_depth(),
-                          levels = 5)
+vfTreeGrid <- grid_regular(cost_complexity(), tree_depth(), levels = 5)
 vfTreeWork <- workflow() %>%
 	add_recipe(allRecipe) %>%
 	add_model(vfTree)
 vfTreeWorkGrid <- vfTreeWork %>%
-	tune_grid(
-	resamples = vfTrain,
-	grid = vfTreeGrid)
+	tune_grid(resamples = vfTrain, grid = vfTreeGrid)
 vfResults <- collect_metrics(vfTreeWorkGrid)
 vfBest <- show_best(vfTreeWorkGrid, metric = "accuracy") 
 
 ## https://www.tidymodels.org/start/tuning/#data
 
+##### Random Forest run
+
+RFmodel <- rand_forest(mtry=10, min_n = 4) %>%
+  set_engine("randomForest") %>%
+  set_mode("classification")
+RFwork <- workflow() %>%
+  add_recipe(allRecipe) %>%
+  add_model(RFmodel)
+RFfit <- fit(RFwork, data = Train)
+
+RFresults <- RFfit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 30)
+RFresults  # Zip codes & states not important
+RFTrngPred <- predict(RFfit, new_data = Train)
+RFTrngAcc <- accuracy(Train, truth = Product, estimate = RFTrngPred$.pred_class) 
+RFTrngAcc  # 97.3% accurate
+count(Train, Product)
+count(RFTrngPred, .pred_class)
+
+Train2 <- Train %>%
+  select(-State, -ZIP.code)
+modRecipe <- Train2 %>%
+  recipe(Product ~ .) %>%
+  step_dummy(Company, one_hot = TRUE) %>%
+  step_nzv(all_predictors())
+RFwork2 <- workflow() %>%
+  add_recipe(modRecipe) %>%
+  add_model(RFmodel)
+RFfit2 <- fit(RFwork2, data = Train2)
+
+RFresults2 <- RFfit2 %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 30)
+RFresults2  # Zip codes & states not important
+RFTrngPred2 <- predict(RFfit2, new_data = Train2)
+RFTrngAcc2 <- accuracy(Train2, truth = Product, estimate = RFTrngPred2$.pred_class) 
+RFTrngAcc2  # 96.7% accurate
+count(Train2, Product)
+count(RFTrngPred2, .pred_class)
+
+##### Random Forest with cross-validation and tuning
+
+vfRF <- vfold_cv(data = Train2, v = 10)
+vfRFmodel <- rand_forest(mtry = tune(), min_n = 4) %>%
+  set_engine("randomForest") %>%
+  set_mode("classification")
+vfRFwork <- workflow() %>%
+  add_recipe(modRecipe) %>% 
+  add_model(vfRFmodel)
+vfRFworkGrid <- vfRFwork %>%
+  tune_grid(resamples = vfRF, grid = 3)
+
+vfResults <- collect_metrics(vfRFworkGrid)
+vfBest <- show_best(vfRFworkGrid, metric = "accuracy") 
+vfBest
+vfFinal <- finalize_workflow(vfRFwork, select_best(vfRFworkGrid)) %>%
+  fit(Train2)
+vfFinalPred <- predict(vfFinal, new_data = Train2)
+vfFinalAcc <- accuracy(Train2, truth = Product, estimate = vfFinalPred$.pred_class) 
+vfFinal  # gives OOB error and class error 
+vfFinalAcc #97.1 accurate
+count(Train2, Product)
+count(vfFinalPred, .pred_class)
 
 ##### Load and check test set
 	
@@ -157,8 +216,8 @@ skim(test)
 ##### Parse/tokenize/stem test set complaints
 
 test <- test %>%
-	select(-Submitted.via) %>%
-	mutate(across(c(Company, State, ZIP.code), as.factor))
+	select(-Submitted.via, -State, -ZIP.code) %>%
+	mutate(across(c(Company), as.factor))
 parsedTest <- test %>%
  	select(problem_id, Consumer.complaint.narrative) %>%
 	unnest_tokens(word, Consumer.complaint.narrative) %>%
@@ -172,7 +231,7 @@ testDTM <- parsedTest %>%
 	cast_dtm(problem_id, word, n)              # 734 terms   
 tempTrain <- tidyTrain %>%
 	mutate(problem_id = temp_id) %>%
-	select(-Product, -temp_id)
+	select(-Product, -temp_id, -State, -ZIP.code)
 tidyTest <- testDTM %>%
 	tidy() %>%
 	rename(problem_id = document) %>%
@@ -184,6 +243,10 @@ tidyTest <- testDTM %>%
 	arrange(problem_id) %>%
 	left_join(test, by = "problem_id") %>%
 	select(-Consumer.complaint.narrative) %>%
+  mutate(navient = 0) %>%
 	select(names(tempTrain))
 
+##### Fit test data to final model
 
+vfFinalTestPred <- predict(vfFinal, new_data = tidyTest)
+vfFinalTestPred
