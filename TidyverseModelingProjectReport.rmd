@@ -1,0 +1,172 @@
+---
+title: "Tidyverse Modeling Project"
+author:  Mark Sucato
+output: 
+  html_document:
+    keep_md: true 
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(cache=TRUE, warning=FALSE, fig.align="center", message=FALSE, error=FALSE)
+```
+<center>
+
+# Tidyverse Modeling Project  
+### by Mark Sucato
+
+</center>
+
+## Summary
+
+
+## Background
+
+The Consumer Financial Protection Bureau (CFPB) is an independent agency of the United States
+ government that promotes transparency and protects consumers by providing information needed to
+ make decisions when choosing financial institutions, including banking institutions, lenders,
+ mortgage services,credit unions, securities firms, foreclosure services, and debt collectors.
+ The CFPB receives and processes complaints and questions about consumer financial products and
+ services.  In support of these tasks, the CFPB maintains the Consumer Complaint Database, which
+records a variety of attributes about each complaint, including free text input of complaint
+ specfics.  
+
+## Training Data
+
+The *Modeling Data in the Tidyverse*-provided training dataset includes 90,975 observations of
+six variables:  
+* product 
+* customer narrative
+* company
+* state
+* zip code
+* submission method  
+
+Initial exploratory analysis indicates no missing or blank observations.  Additionally, all 
+complaints were submitted via the internet(web).
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(tidytext)
+library(corpus)
+library(tm)
+library(corrplot)
+library(randomForest)
+library(vip)
+library(knitr)
+set.seed(1234)
+
+train <- read_csv("data_complaints_train.csv")
+names(train) <- make.names(names(train), unique = TRUE) 
+skim(train) 
+```
+ 
+## Initial Data Wrangling Approach
+
+This project utilizes text analysis to identify the 15 most commonly used words for each of the
+four product types in the training dataset.  These *keywords* are then combined and used to 
+build a DocumentTermMatrix (DTM) that, once combined with the other four predictor variables, forms the
+initial Machine Learning feature list.  Specific steps include:  
+* Parse the Consumer Complaint Narratives to remove "xx" sanitized details, stop words and
+unecessary spaces.  Results are then reduced to stem words to aid analysis(*parsedPreProc*).
+Because every observation comes from the internet, *submitted.via* is also removed as a potential
+predictor. 
+* For each of the four provided product types, identify the 15 most commonly used keywords (
+*parsedCard, parsedVeh, parsedMortg & parsedStu*)
+* Aggregate the keywords into one list *keywords*, which is then used to build a training
+dataset DTM of 28 unique keywords (*trainDTM*). 
+* Transform *trainDTM* into a tidy dataset and combine it with the predictor variables provided
+in the orginal dataset (*Train*).    
+
+``` {r}
+train <- train %>%
+	select(-Submitted.via) %>%
+	mutate(across(c(Product, Company, State, ZIP.code), as.factor)) %>%
+	mutate(temp_id = c(1:length(Product)))
+parsedPreProc <- train %>%
+  select(temp_id, Product, Consumer.complaint.narrative) %>%
+  unnest_tokens(word, Consumer.complaint.narrative) %>%
+  anti_join(stop_words) %>%
+  filter(!str_detect(word, "xx")) %>%
+  filter(!str_detect(word, "\\d")) %>%
+  filter(!str_detect(word, "\\s")) %>%
+  mutate(word = text_tokens(word, stemmer = "en")) 
+
+parsedCard <- parsedPreProc %>%
+  filter(Product == "Credit card or prepaid card") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+parsedVeh <- parsedPreProc %>%
+  filter(Product == "Vehicle loan or lease") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+parsedMortg <- parsedPreProc %>%
+  filter(Product == "Mortgage") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+parsedStu <- parsedPreProc %>%
+  filter(Product == "Student loan") %>%
+  select(-Product) %>%
+  count(temp_id, word) %>%
+  group_by(word) %>%
+  summarise (total = sum(n)) %>%
+  arrange(desc(total)) %>%
+  slice(1:15)
+
+keywords1 <- full_join(parsedCard, parsedMortg)
+keywords2 <- full_join(parsedStu, parsedVeh)
+keywords <- full_join(keywords1, keywords2) %>%
+  select(word) %>%
+  distinct(word)
+parsedTrain <- train %>%
+	select(temp_id, Consumer.complaint.narrative) %>%
+	unnest_tokens(word, Consumer.complaint.narrative) %>%
+	mutate(word = text_tokens(word, stemmer = "en")) %>%
+  semi_join(keywords) %>%
+	count(temp_id, word)  
+trainDTM <- parsedTrain %>%
+	cast_dtm(temp_id, word, n)
+
+tidyTrain <- trainDTM %>%
+	tidy() %>%
+	rename(temp_id = document) %>%
+	pivot_wider(names_from = term, 
+			values_from = count, 
+			names_repair = "minimal", 
+			values_fill = 0) %>%
+	mutate(temp_id = as.numeric(temp_id)) %>%
+	arrange(temp_id) %>%
+	left_join(train, by = "temp_id") %>%
+	select(-Consumer.complaint.narrative)
+Train <- tidyTrain %>%
+	select(-temp_id)
+```
+
+A visual correlation plot of the remaining feature variables confirms relatively little 
+correlation between parsed-text features.
+
+```{r, fig.width=12}
+trainCor <- cor(Train %>% select_if(is.numeric))
+corrplot(trainCor, tl.cex = 0.5)
+```
+
+
+
+
+
+## Problem #1
+
+
