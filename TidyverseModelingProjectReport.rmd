@@ -18,6 +18,15 @@ knitr::opts_chunk$set(cache=TRUE, warning=FALSE, fig.align="center", message=FAL
 
 ## Summary
 
+Utilization of a tuned Random Forest machine learning algorithm, trained on a 
+data set composed of 90,975 observations and heavily reliant on keyword-based 
+text analysis of free-text complaint information, produced a final accuracy of
+ 96.6% against the training dataset and a predicted out-of-sample error rate
+ of 14.59%.  The model excelled at predicting card-based accounts, but struggled
+ with auto and student loans.  This weakness is almost certainly due to product 
+distrubutions within the training set.  Any test data with large amounts of non-mortgage 
+loans will likely see higher error rates than predicted here.   
+
 
 ## Background
 
@@ -28,7 +37,7 @@ The Consumer Financial Protection Bureau (CFPB) is an independent agency of the 
  The CFPB receives and processes complaints and questions about consumer financial products and
  services.  In support of these tasks, the CFPB maintains the Consumer Complaint Database, which
 records a variety of attributes about each complaint, including free text input of complaint
- specfics.  
+ specifics.  
 
 ## Training Data
 
@@ -69,11 +78,11 @@ four product types in the training dataset.  These *keywords* are then combined 
 build a DocumentTermMatrix (DTM) that, once combined with the other four predictor variables, forms the
 initial Machine Learning feature list.  Specific steps include:  
 * Parse the Consumer Complaint Narratives to remove "xx" sanitized details, stop words and
-unecessary spaces.  Results are then reduced to stem words to aid analysis(*parsedPreProc*).
+unnecessary spaces.  Results are then reduced to stem words to aid analysis(*parsedPreProc*).
 Because every observation comes from the internet, *submitted.via* is also removed as a potential
 predictor. 
-* For each of the four provided product types, identify the 15 most commonly used keywords (
-*parsedCard, parsedVeh, parsedMortg & parsedStu*)
+* For each of the four provided product types, identify the 15 most commonly used keywords
+ (*parsedCard, parsedVeh, parsedMortg & parsedStu*)
 * Aggregate the keywords into one list *keywords*, which is then used to build a training
 dataset DTM of 28 unique keywords (*trainDTM*). 
 * Transform *trainDTM* into a tidy dataset and combine it with the predictor variables provided
@@ -155,7 +164,7 @@ Train <- tidyTrain %>%
 	select(-temp_id)
 ```
 
-A visual correlation plot of the remaining feature variables confirms relatively little 
+A correlation plot of the remaining feature variables confirms relatively little 
 correlation between parsed-text features.
 
 ```{r, fig.width=12}
@@ -163,10 +172,162 @@ trainCor <- cor(Train %>% select_if(is.numeric))
 corrplot(trainCor, tl.cex = 0.5)
 ```
 
+## Initial modeling
 
+A Random Forest approach within the tidymodel ecosystem is used to initially
+ model the data.  The initial recipe uses the combined dataset, replaces
+all factor features with dummy numerical variables and checks for variables
+with zero variance. Analysis of the predictor variables' importance indicates
+ ZIP codes and states are not leading predictors within the training set.
 
+```{r, fig.width=12}
+allRecipe <- Train %>%
+	recipe(Product ~ .) %>%
+	step_dummy(Company, State, ZIP.code, one_hot = TRUE) %>%
+	step_nzv(all_predictors())
+RFmodel <- rand_forest(mtry=10, min_n = 4) %>%
+  set_engine("randomForest") %>%
+  set_mode("classification")
+RFwork <- workflow() %>%
+  add_recipe(allRecipe) %>%
+  add_model(RFmodel)
+RFfit <- fit(RFwork, data = Train)
 
+RFresults <- RFfit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 30)
+RFresults
+```
 
-## Problem #1
+Without any cross-validation, this model predicted the training dataset with
+97.3% accuracy.  The Out-of-Bag estimate of error is 14.45%, implying an out
+of sample accuracy of 85.55%.  Examination of the confusion matrix indicates
+the model accurately predicted card accounts, but struggled with non-mortgage
+ loans. 
 
+```{r, results="hold"}
+RFTrngPred <- predict(RFfit, new_data = Train)
+RFTrngAcc <- accuracy(Train, truth = Product, estimate = RFTrngPred$.pred_class) 
+RFTrngAcc
+RFfit 
+```
 
+## Revised model
+
+Initially, the same model is tested against a training dataset with state and
+zip code predictors removed in the interest of reduced computation time. This 
+produced marginally less accuracy against the training set in exchange for slight
+improvements in computation time.
+
+```{r, fig.width=12, results="hold"} 
+Train2 <- Train %>%
+  select(-State, -ZIP.code)
+modRecipe <- Train2 %>%
+  recipe(Product ~ .) %>%
+  step_dummy(Company, one_hot = TRUE) %>%
+  step_nzv(all_predictors())
+RFwork2 <- workflow() %>%
+  add_recipe(modRecipe) %>%
+  add_model(RFmodel)
+RFfit2 <- fit(RFwork2, data = Train2)
+
+RFresults2 <- RFfit2 %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 30)
+RFresults2
+
+RFTrngPred2 <- predict(RFfit2, new_data = Train2)
+RFTrngAcc2 <- accuracy(Train2, truth = Product, estimate = RFTrngPred2$.pred_class) 
+RFTrngAcc2
+```
+
+## Modeling with Cross-Validation & Tuning
+
+To regain the lost accuracy, cross-validation and tuning is introduced. The
+tuned "best" values are set into the model to produce the final result.  The
+final "tuned" model did not regain the marginal accuracy against the training set, 
+with an accuracy of 96.6% against the training set and an estimated error of
+85.41% against out-of-sample data.  As before, the final model excels with 
+card-based accounts but struggles categorizing student and auto loans.  This 
+almost certainly traces to the card-heavy distribution of products within the 
+training set.
+
+```{r, results="hold"}
+vfRF <- vfold_cv(data = Train2, v = 10)
+vfRFmodel <- rand_forest(mtry = tune(), min_n = 4) %>%
+  set_engine("randomForest") %>%
+  set_mode("classification")
+vfRFwork <- workflow() %>%
+  add_recipe(modRecipe) %>% 
+  add_model(vfRFmodel)
+vfRFworkGrid <- vfRFwork %>%
+  tune_grid(resamples = vfRF, grid = 3)
+
+vfResults <- collect_metrics(vfRFworkGrid)
+vfBest <- show_best(vfRFworkGrid, metric = "accuracy") 
+vfBest
+vfFinal <- finalize_workflow(vfRFwork, select_best(vfRFworkGrid)) %>%
+  fit(Train2)
+vfFinalPred <- predict(vfFinal, new_data = Train2)
+vfFinalAcc <- accuracy(Train2, truth = Product, estimate = vfFinalPred$.pred_class) 
+vfFinalAcc
+vfFinal
+```  
+
+## Modeling test set data
+
+Like the training set, the provided test set has no NAs or missing values.
+Unlike the training set, the test set has a problem ID variable in place of 
+the true product details.  The test data is wrangled in an almost identical 
+fashion as the training data.  The final predicted results are listed below.
+
+```{r}
+test <- read_csv("data_complaints_test.csv")
+names(test) <- make.names(names(test), unique = TRUE)
+skim(test) 
+
+test <- test %>%
+	select(-Submitted.via, -State, -ZIP.code) %>%
+	mutate(across(c(Company), as.factor))
+parsedTest <- test %>%
+ 	select(problem_id, Consumer.complaint.narrative) %>%
+	unnest_tokens(word, Consumer.complaint.narrative) %>%
+	anti_join(stop_words) %>%
+	filter(!str_detect(word, "xx")) %>%
+	filter(!str_detect(word, "\\d")) %>%
+	filter(!str_detect(word, "\\s")) %>%
+	mutate(word = text_tokens(word, stemmer = "en")) %>%
+	count(problem_id, word)
+testDTM <- parsedTest %>%
+	cast_dtm(problem_id, word, n)                 
+tempTrain <- tidyTrain %>%
+	mutate(problem_id = temp_id) %>%
+	select(-Product, -temp_id, -State, -ZIP.code)
+tidyTest <- testDTM %>%
+	tidy() %>%
+	rename(problem_id = document) %>%
+	pivot_wider(names_from = term, 
+			values_from = count, 
+			names_repair = "minimal", 
+			values_fill = 0) %>%
+	mutate(problem_id = as.numeric(problem_id)) %>%
+	arrange(problem_id) %>%
+	left_join(test, by = "problem_id") %>%
+	select(-Consumer.complaint.narrative) %>%
+  mutate(navient = 0) %>%
+	select(names(tempTrain))
+
+vfFinalTestPred <- predict(vfFinal, new_data = tidyTest)
+vfFinalTestPred
+```
+
+## Conclusions
+
+As demonstrated by the differences between training set accuracy and estimated
+error, the Random Forest algorithm clearly "learned" the training set.  The
+removal of state and ZIP code predictors marginally improved computation efficiency
+at a slight cost of accuracy. The introduction of cross-validation and tuning
+failed to recover the lost accuracy and produced a final predicted out-of-sample error
+ rate of 85.41%.  Because the model exhibited varying accuracies against different 
+product types, the ultimate accuracy of the model against test data will, in 
+part, be determined by the mix of the four products within the test data.
