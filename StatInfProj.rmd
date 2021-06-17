@@ -1,0 +1,99 @@
+---
+title: "Statistical Inference Project"
+author:  Mark Sucato
+output: 
+  pdf_document:
+    keep_md: true 
+---
+```{r include=FALSE}
+knitr::opts_chunk$set(cache=TRUE, warning=FALSE, message=FALSE, error=FALSE,
+	results="asis")
+```
+<center>
+# Statistical Inference Project  
+### by Mark Sucato
+### *** Complete R code provided in Appendix 1 ***
+</center>
+
+```{r, echo=FALSE}
+library(knitr)
+library(car)
+library(datasets)
+library(tidyverse)
+library(kableExtra)
+library(cowplot)
+set.seed(1234)
+```
+
+### Overview
+
+blah blah blah
+
+<center>
+## Part One:  Simulation of Exponential Distributions
+</center>
+
+### Simulation specifics and descriptive statistics discussion
+
+Simulation of 1,000 exponential distribution samples (n=40 per sample, lambda =0.2) is 
+achieved through a single-line 'for' loop that creates a vector *results* 
+containing the mean of each n=40 sample.
+
+```{r}
+results <- NULL
+for(i in 1:1000) results[i] <- mean(rexp(40, 0.2))
+```
+
+Actual and theoretical means and variances are shown below in *Table 1*. As expected, the mean of the sample distribution means closely aligns to the underlying 
+exponential distribution mean.  This validates the concept of the sample mean as a 
+consistent estimator of the population mean. The sample distribution variance, however, does
+not closely align to the the theoretical sample population variance.  This variance 
+is a function of the underlying exponential distribution variance and the size of the 
+n=40 samples.  With more simulation repetitions, this sample distribution variance would more closely 
+approach the theoretical value.  
+
+```{r, echo=FALSE}
+mu <- 1/0.2         
+xBar <- round(mean(results), digits = 3)
+varExp <- 1/(0.2)^2     
+varBar <- round(varExp/40, digits = 3)       
+varActual<- round(var(results), digits = 3)  
+Value <- c(mu, xBar, varBar, varActual)
+Stats <- c("Population Mean", "Sample Mean", "Theoretical Sample Variance", "Actual Sample Variance")
+tableData <- cbind(Stats, Value)
+wideTable <- pivot_wider(as_tibble(tableData), names_from=Stats, values_from = Value)
+kable(wideTable, align = "cccc", caption = 'Table 1: Comparison of Means and Variances') %>%
+	kable_styling(position = "center") %>%
+	kable_classic(full_width = F)
+```
+
+### Simulation distribution normality
+
+A histogram of the simulation distribution, with normal distribution superimposed,
+ is shown below in *Figure 1A*. A QQ plot of the simulation distribution is shown
+in *Figure 1B*.
+
+```{r, echo=FALSE}
+h <- hist(results, breaks=20, main = "Figure 1: Distribution of 1000 Simulated Exponential Sample Means
+	 (n=40)", xlab = "Means of Exponential Samples (n=40)", col="firebrick")
+xfit <- seq(min(results), max(results), length=length(results))
+yfit <- dnorm(xfit, mean=mean(results), sd=sd(results))
+yfit <- yfit*diff(h$mids[1:2])*length(results)
+p1 <- lines(xfit, yfit, col="blue", lwd=2)
+p2 <- qqPlot(results, ylab = "Simulated Distribution", xlab = "Normal Distribution",
+	main = "QQ Plot for 1000 Simulated Exponential Sample Means",
+	id = FALSE)
+plot_grid(p1, p2, labels = c('1A', '1B'), label_size = 12)
+
+```
+
+ 
+
+
+
+
+
+<center>
+## Part Two:  Exploration of ToothGrowth Dataset  
+</center>
+
